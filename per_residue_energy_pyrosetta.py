@@ -1,8 +1,6 @@
 import argparse
 import os
 
-from Bio import PDB
-import numpy as np
 import pandas as pd
 import pyrosetta
 from pyrosetta import rosetta
@@ -19,46 +17,11 @@ from pyrosetta.rosetta.core.pack.task.operation import (
 # FastRelax mover
 from pyrosetta.rosetta.protocols.relax import FastRelax
 
-
-
-
-def get_residue_pairs_within_distance(pdb_file, binder_id, target_id, distance_threshold=10.0):
-
-    parser = PDB.PDBParser(QUIET=True)
-    structure = parser.get_structure("protein", pdb_file)
-    model = structure[0]
-    binder_chain = model[binder_id]
-    target_chain = model[target_id]
-
-    selected_pairs = set()  
-    # selected_target = set()
-    # selected_binder = set()
-    for res1 in binder_chain:
-        coord1 = get_cb_or_ca(res1)
-        for res2 in target_chain:
-            coord2 = get_cb_or_ca(res2)
-            if coord1 is not None and coord2 is not None:
-                distance = np.linalg.norm(coord1 - coord2)
-                if distance <= distance_threshold:
-                    selected_pairs.add((res1.id[1], res2.id[1])) 
-                    # selected_target.add(res1.id[1])
-                    # selected_binder.add(res2.id[1])
-
-    return selected_pairs
-
-
-def get_interface_energy(interchain_score_df, interface_pair, binder_id, plot_path):
-    # interchain_score_df = pd.read_csv(interchain_score_path)
-    #('L', 'R', l_res, r_res): (pair_idx1, pair_idx2, l_res, r_res)
-
-    interchain_score_df['in_interface'] = interchain_score_df.apply(lambda row: (int(row['binder_res']), int(row['target_res'])) in interface_pair, axis=1)
-    interface_score_df = interchain_score_df.loc[interchain_score_df['in_interface']==True]
-    summed_df = interface_score_df.groupby('binder_res')['total'].sum().reset_index()
-    summed_dict = summed_df.set_index('binder_res')['total'].to_dict()
-    print(interface_score_df.head(2))
-    print(interface_score_df.columns)
-    plot_score(interchain_score_df, plot_path)
-    return summed_dict
+# reuse your existing logic for interface detection + aggregation (same directory)
+from get_interface_energy import (
+    get_residue_pairs_within_distance,
+    get_interface_energy,
+)
 
 
 def init_pyrosetta(extra_flags: str = ""):
