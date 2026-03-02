@@ -29,6 +29,23 @@ def init_pyrosetta(extra_flags: str = ""):
     pyrosetta.init(f"-ignore_zero_occupancy false {extra_flags}")
 
 
+def relax_pose(
+    pdb_file: str,
+    binder_chain: str,
+    target_chain: str,
+):
+    """
+    Load a pose from pdb_file, run FastRelax with the XML-like task/movemap,
+    and return the relaxed pose and scorefunction.
+    """
+    pose = rosetta.core.import_pose.pose_from_file(pdb_file)
+    # use standard full-atom scorefunction; relax script is controlled by flags
+    scorefxn = pyrosetta.get_fa_scorefxn()
+    apply_fast_relax_with_task(pose, scorefxn, binder_chain, target_chain)
+    scorefxn(pose)  # populate pose.energies() after relax
+    return pose, scorefxn
+
+
 def apply_fast_relax_with_task(
     pose: rosetta.core.pose.Pose,
     scorefxn: rosetta.core.scoring.ScoreFunction,
@@ -71,25 +88,19 @@ def apply_fast_relax_with_task(
 
 
 def compute_interface_pair_energies_with_pyrosetta(
+    pose: rosetta.core.pose.Pose,
     pdb_file: str,
     binder_chain: str,
     target_chain: str,
+    scorefxn: rosetta.core.scoring.ScoreFunction,
     distance_threshold: float = 10.0,
 ):
     """
     Compute pairwise energies for residue pairs at the interface between
-    binder_chain and target_chain using PyRosetta.
+    binder_chain and target_chain using a (typically relaxed) pose.
     Returns a DataFrame with columns:
         binder_id, target_id, binder_res, target_res, total, [per-term columns...]
     """
-    pose = rosetta.core.import_pose.pose_from_file(pdb_file)
-
-    # standard full-atom scorefunction (similar to what FastRelax uses)
-    scorefxn = pyrosetta.get_fa_scorefxn()
-    # mimic the XML FastRelax protocol before scoring
-    apply_fast_relax_with_task(pose, scorefxn, binder_chain, target_chain)
-    scorefxn(pose)  # populate pose.energies() after relax
-
     weights = scorefxn.weights()
     pdb_info = pose.pdb_info()
 
@@ -175,22 +186,35 @@ def main():
 
     init_pyrosetta(args.extra_flags)
 
-    # step 1: compute per-residue-pair energies at the interface with PyRosetta
-    interchain_score_df = compute_interface_pair_energies_with_pyrosetta(
+    # step 1: relax the input structure
+    pose, scorefxn = relax_pose(
         pdb_file=args.pdb,
         binder_chain=args.binder_id,
         target_chain=args.target_id,
+    )
+
+    # optionally save relaxed PDB for inspection
+    pdb_basename = os.path.splitext(os.path.basename(args.pdb))[0]
+    relaxed_pdb_path = os.path.join(args.output_dir, f"{pdb_basename}_relaxed.pdb")
+    pose.dump_pdb(relaxed_pdb_path)
+
+    # step 2: compute per-residue-pair energies at the interface with PyRosetta
+    interchain_score_df = compute_interface_pair_energies_with_pyrosetta(
+        pose=pose,
+        pdb_file=args.pdb,
+        binder_chain=args.binder_id,
+        target_chain=args.target_id,
+        scorefxn=scorefxn,
         distance_threshold=args.interface_dist,
     )
 
-    # step 2: save per-pair energies (including per-term columns) for inspection
-    pdb_basename = os.path.splitext(os.path.basename(args.pdb))[0]
+    # step 3: save per-pair energies (including per-term columns) for inspection
     per_pair_csv = os.path.join(
         args.output_dir, f"{pdb_basename}_pair_energies_pyrosetta.csv"
     )
     interchain_score_df.to_csv(per_pair_csv, index=False)
 
-    # step 3: reuse your existing aggregation + plotting code
+    # step 4: reuse your existing aggregation + plotting code
     plot_path = os.path.join(
         args.output_dir, f"{pdb_basename}_interface_binder_residues_score_heatmap.png"
     )
