@@ -33,14 +33,35 @@ def relax_pose(
     pdb_file: str,
     binder_chain: str,
     target_chain: str,
+    xml_protocol: str | None = None,
 ):
     """
-    Load a pose from pdb_file, run FastRelax with the XML-like task/movemap,
-    and return the relaxed pose and scorefunction.
+    Load a pose from pdb_file, run relaxation, and return the relaxed pose
+    and scorefunction.
+
+    If xml_protocol is provided, use RosettaScripts to run exactly that XML
+    (e.g. your update.xml with FastRelax + ScoreCutoffFilter). Otherwise,
+    fall back to the hand-translated FastRelax setup.
     """
     pose = rosetta.core.import_pose.pose_from_file(pdb_file)
-    # use standard full-atom scorefunction; relax script is controlled by flags
     scorefxn = pyrosetta.get_fa_scorefxn()
+
+    if xml_protocol is not None:
+        # Use XmlObjects helper to load and run the RosettaScripts XML protocol.
+        # This mirrors how RosettaScripts is used in compiled Rosetta.
+        with open(xml_protocol, "r") as f:
+            xml_string = f.read()
+        xml_objs = rosetta.protocols.rosetta_scripts.XmlObjects.create_from_string(
+            xml_string
+        )
+        # Top-level protocol mover is conventionally named "ParsedProtocol"
+        rs_mover = xml_objs.get_mover("ParsedProtocol")
+        rs_mover.apply(pose)
+        # Ensure energies are populated under the standard full-atom scorefunction
+        scorefxn(pose)
+        return pose, scorefxn
+
+    # Fallback: approximate XML behavior using explicit FastRelax + selectors
     apply_fast_relax_with_task(pose, scorefxn, binder_chain, target_chain)
     scorefxn(pose)  # populate pose.energies() after relax
     return pose, scorefxn
@@ -180,6 +201,18 @@ def main():
         default="",
         help="Extra PyRosetta init flags, if needed (e.g. database path)",
     )
+    parser.add_argument(
+        "--xml_protocol",
+        default=None,
+        help="Optional RosettaScripts XML file to run for relax (e.g. update.xml)",
+    )
+
+    parser.add_argument(
+        "--energy_threshold",
+        type=float,
+        default=-5.0,
+        help="Energy threshold for identifying strongly favorable residues",
+    )
 
     args = parser.parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -191,6 +224,7 @@ def main():
         pdb_file=args.pdb,
         binder_chain=args.binder_id,
         target_chain=args.target_id,
+        xml_protocol=args.xml_protocol,
     )
 
     # optionally save relaxed PDB for inspection
@@ -239,12 +273,11 @@ def main():
 
     # step 5: identify strongly favorable residues and record their amino acids
     # filter for any residue with energy < -5.0 and capture the one-letter AA
-    ENERGY_THRESHOLD = -5.0
     pdb_info = pose.pdb_info()
     key_res = {}
     for resnum_str, energy in summed_dict.items():
         energy_val = float(energy)
-        if energy_val >= ENERGY_THRESHOLD:
+        if energy_val >= args.energy_threshold:
             continue
         pdb_resnum = int(resnum_str)
         pose_idx = pdb_info.pdb2pose(args.binder_id, pdb_resnum)
@@ -269,7 +302,7 @@ def main():
     fixed_residue_df.to_csv(fixed_csv, index=False)
 
     print(f"Saved per-residue interface energies to {out_csv}")
-    print(f"Saved filtered key residues (E < {ENERGY_THRESHOLD}) with amino acids to {fixed_csv}")
+    print(f"Saved filtered key residues (E < {args.energy_threshold}) with amino acids to {fixed_csv}")
     print(f"Saved heatmap to {plot_path}")
 
 
