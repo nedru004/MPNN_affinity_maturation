@@ -2,7 +2,7 @@ import os,sys
 import time
 from tqdm import tqdm
 import torch
-sys.path.append('/Users/david.nedrud/Documents/GitHub/flowpacker/')
+sys.path.append('/content/flowpacker/')
 from utils.loader import load_seed, load_device, load_ema, load_checkpoint, load_config
 from utils.logger import Logger, set_log
 from utils.train_utils import count_parameters
@@ -134,7 +134,7 @@ class Sampler(object):
         self.ckpt = f'{ts}'
 
         print(f'{self.ckpt}')
-        ckpt_dict = torch.load(self.config.ckpt)
+        ckpt_dict = torch.load(self.config.ckpt, weights_only=False)
         train_cfg = ckpt_dict['config']
         self.log_folder_name, self.log_dir, self.ckpt_dir = set_log(train_cfg)
         self.model = CNF(EquiformerV2(**train_cfg.model), train_cfg, coeff=self.config.sample.coeff,
