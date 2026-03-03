@@ -78,7 +78,7 @@ def apply_fast_relax_with_task(
 
     # MoveMap: no backbone moves, allow sidechain (chi) moves
     mm = rosetta.core.kinematics.MoveMap()
-    mm.set_bb(False)
+    #mm.set_bb(False)
     mm.set_chi(True)
 
     relax = FastRelax(scorefxn, 2)
@@ -230,14 +230,46 @@ def main():
         plot_path=plot_path,
     )
 
-    # save per-binder-residue summed energies as a small one-row CSV, or extend as needed
+    # save per-binder-residue summed energies as a small one-row CSV
     out_df = pd.DataFrame(
         [{"pdbpath": args.pdb, "binder_id": args.binder_id, "binder_energy": summed_dict}]
     )
     out_csv = os.path.join(args.output_dir, "residue_energy_pyrosetta.csv")
     out_df.to_csv(out_csv, index=False)
 
+    # step 5: identify strongly favorable residues and record their amino acids
+    # filter for any residue with energy < -5.0 and capture the one-letter AA
+    ENERGY_THRESHOLD = -5.0
+    pdb_info = pose.pdb_info()
+    key_res = {}
+    for resnum_str, energy in summed_dict.items():
+        energy_val = float(energy)
+        if energy_val >= ENERGY_THRESHOLD:
+            continue
+        pdb_resnum = int(resnum_str)
+        pose_idx = pdb_info.pdb2pose(args.binder_id, pdb_resnum)
+        if pose_idx == 0:
+            continue
+        aa_one_letter = pose.residue(pose_idx).name1()
+        key_res[resnum_str] = [energy_val, aa_one_letter]
+
+    fixed_residue_df = pd.DataFrame(
+        [
+            {
+                "pdb_path": args.pdb,
+                "pdb_name": pdb_basename,
+                "target_id": args.target_id,
+                "binder_id": args.binder_id,
+                "key_res": key_res,
+                "num_fixed_residues": len(key_res),
+            }
+        ]
+    )
+    fixed_csv = os.path.join(args.output_dir, "fixed_residue_pyrosetta.csv")
+    fixed_residue_df.to_csv(fixed_csv, index=False)
+
     print(f"Saved per-residue interface energies to {out_csv}")
+    print(f"Saved filtered key residues (E < {ENERGY_THRESHOLD}) with amino acids to {fixed_csv}")
     print(f"Saved heatmap to {plot_path}")
 
 
