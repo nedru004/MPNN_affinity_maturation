@@ -2,7 +2,8 @@ import pandas as pd
 import os
 import ast
 from tqdm import tqdm
-
+import csv
+from Bio import SeqIO
 
 # merge key residues into one pdb file
 def process_pdb_mutation_and_renumber(csv, pdb_output_dir, 
@@ -70,3 +71,35 @@ def process_pdb_mutation_and_renumber(csv, pdb_output_dir,
         with open(output_pdb, "w") as f:
             f.writelines(new_lines)
     print("All done!")
+
+
+def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb"):
+
+    seen_seqs = set()
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+
+    with open(output_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(["link_name", "seq", "seq_idx"])
+        for folder in input_dirs:
+            if not os.path.exists(folder): continue
+            files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(('.fasta', '.fa'))]
+
+            for file_path in files:
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+
+                for i, record in enumerate(SeqIO.parse(file_path, "fasta")):
+                    if i == 0:
+                        continue
+
+                    seq_str = str(record.seq)
+                    if seq_str in seen_seqs:
+                        continue
+                    seen_seqs.add(seq_str)
+                    link_name = f"{base_name}{suffix}"
+                    seq_idx = str(i)
+
+                    writer.writerow([link_name, seq_str, seq_idx])
+
+    print(f"✅ Processing complete! {len(seen_seqs)} unique sequences have been written to: {output_csv}")
