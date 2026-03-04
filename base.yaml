@@ -11,7 +11,7 @@ data:
   max_radius: 16.0
   max_neighbors: 30
 
-ckpt: ' /content/flowpacker/checkpoints/cluster.pth'
+ckpt: '/content/flowpacker/checkpoints/cluster.pth'
 conf_ckpt: # './checkpoints/confidence.pth'
 
 sample:
