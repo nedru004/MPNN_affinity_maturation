@@ -4,6 +4,8 @@ import ast
 from tqdm import tqdm
 import csv
 from Bio import SeqIO
+import json
+from pathlib import Path
 
 # merge key residues into one pdb file
 def process_pdb_mutation_and_renumber(csv, pdb_output_dir, 
@@ -103,3 +105,116 @@ def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb")
                     writer.writerow([link_name, seq_str, seq_idx])
 
     print(f"✅ Processing complete! {len(seen_seqs)} unique sequences have been written to: {output_csv}")
+
+def extract_boltz_scores_to_csv(input_dir: str, output_csv: str):
+    """
+    Extracts scores from Boltz JSON files in the given directory (including subdirectories)
+    and outputs them to a CSV file.
+    """
+    score_keys = [
+        "confidence_score",
+        "ptm",
+        "iptm",
+        "ligand_iptm",
+        "protein_iptm",
+        "complex_plddt",
+        "complex_iplddt",
+        "complex_pde",
+        "complex_ipde"
+    ]
+    
+    data_list = []
+    input_path = Path(input_dir)
+    json_files = list(input_path.rglob("*.json"))
+    
+    for json_file in tqdm(json_files, desc="Parsing JSON files"):
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            if "confidence_score" in data:
+                row = {"filename": json_file.name, "filepath": str(json_file)}
+                for key in score_keys:
+                    row[key] = data.get(key, None)
+                
+                # Also extract chain specific scores if present (optional but could be useful)
+                if "chains_ptm" in data:
+                    for chain_idx, val in data["chains_ptm"].items():
+                        row[f"chain_{chain_idx}_ptm"] = val
+                        
+                data_list.append(row)
+        except Exception as e:
+            print(f"Error parsing {json_file}: {e}")
+            
+    if not data_list:
+        print(f"No valid Boltz score JSON files found in {input_dir}")
+        return
+        
+    df = pd.DataFrame(data_list)
+    
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    print(f"✅ Extracted scores from {len(df)} files to {output_csv}")
+
+def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None):
+    """
+    Reads all PDB files from a directory, extracts the sequence for each chain,
+    and outputs a .yaml file formatted for Boltz prediction for each PDB.
+    """
+    three_to_one = {
+        'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
+        'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
+        'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
+        'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V'
+    }
+    
+    input_path = Path(input_dir)
+    if output_dir is None:
+        output_dir = input_dir
+    os.makedirs(output_dir, exist_ok=True)
+    
+    pdb_files = list(input_path.glob("*.pdb"))
+    
+    for pdb_file in tqdm(pdb_files, desc="Generating Boltz YAMLs"):
+        chains = {}
+        last_resi_id = None
+        
+        with open(pdb_file, "r") as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    res_name = line[17:20].strip()
+                    chain_id = line[21]
+                    resi_id = line[22:27].strip() # include insertion code if present
+                    altloc = line[16]
+                    
+                    # keep only first altloc (blank, 'A', or '1')
+                    if altloc not in [' ', 'A', '1']:
+                        continue
+                        
+                    if chain_id not in chains:
+                        chains[chain_id] = []
+                        
+                    current_res = (chain_id, resi_id)
+                    # avoid sequence duplication if atom for same residue appears consecutively
+                    if last_resi_id != current_res:
+                        chains[chain_id].append(three_to_one.get(res_name, 'X'))
+                        last_resi_id = current_res
+                        
+        if not chains:
+            print(f"Warning: No ATOM lines found in {pdb_file}")
+            continue
+            
+        yaml_lines = ["version: 1\nsequences:\n"]
+        for chain_id, seq_list in chains.items():
+            # remove unrecognised amino acids ('X') that might act as weird gaps
+            seq_str = "".join(seq_list).replace('X', '')
+            if seq_str:
+                yaml_lines.append("  - protein:\n")
+                yaml_lines.append(f"      id: {chain_id}\n")
+                yaml_lines.append(f"      sequence: {seq_str}\n")
+                
+        output_yaml = Path(output_dir) / f"{pdb_file.stem}.yaml"
+        with open(output_yaml, "w") as f:
+            f.writelines(yaml_lines)
+            
+    print(f"✅ Generated {len(pdb_files)} Boltz YAML files in {output_dir}")
