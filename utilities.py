@@ -6,6 +6,7 @@ import csv
 from Bio import SeqIO
 import json
 from pathlib import Path
+import shutil
 
 # merge key residues into one pdb file
 def process_pdb_mutation_and_renumber(csv, pdb_output_dir, 
@@ -106,7 +107,7 @@ def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb")
 
     print(f"✅ Processing complete! {len(seen_seqs)} unique sequences have been written to: {output_csv}")
 
-def extract_boltz_scores_to_csv(input_dir: str, output_csv: str):
+def filter_boltz_scores(input_dir: str, output_csv: str, output_dir: str, threshold_pTM = 0.8, threshold_ipTM = 0.8):
     """
     Extracts scores from Boltz JSON files in the given directory (including subdirectories)
     and outputs them to a CSV file.
@@ -127,6 +128,9 @@ def extract_boltz_scores_to_csv(input_dir: str, output_csv: str):
     input_path = Path(input_dir)
     json_files = list(input_path.rglob("*.json"))
     
+    # Ensure output directory for selected PDBs exists
+    os.makedirs(output_dir, exist_ok=True)
+
     for json_file in tqdm(json_files, desc="Parsing JSON files"):
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -141,8 +145,47 @@ def extract_boltz_scores_to_csv(input_dir: str, output_csv: str):
                 if "chains_ptm" in data:
                     for chain_idx, val in data["chains_ptm"].items():
                         row[f"chain_{chain_idx}_ptm"] = val
-                        
+
                 data_list.append(row)
+
+                # If this prediction passes the thresholds, try to copy the matching PDB
+                ptm_val = data.get("ptm")
+                iptm_val = data.get("iptm")
+                if (
+                    ptm_val is not None
+                    and iptm_val is not None
+                    and ptm_val >= threshold_pTM
+                    and iptm_val >= threshold_ipTM
+                ):
+                    # Heuristic: assume the PDB lives next to the JSON and shares its stem,
+                    # optionally without a leading "confidence_" prefix.
+                    json_stem = json_file.stem
+                    candidate_stems = {json_stem}
+                    if json_stem.startswith("confidence_"):
+                        candidate_stems.add(json_stem[len("confidence_"):])
+
+                    pdb_path = None
+                    for pdb_file in json_file.parent.glob("*.pdb"):
+                        if pdb_file.stem in candidate_stems:
+                            pdb_path = pdb_file
+                            break
+
+                    if pdb_path is None:
+                        # Fall back to a looser match: stem substring match
+                        for pdb_file in json_file.parent.glob("*.pdb"):
+                            if any(stem in pdb_file.stem for stem in candidate_stems):
+                                pdb_path = pdb_file
+                                break
+
+                    if pdb_path is not None and pdb_path.is_file():
+                        dest_path = Path(output_dir) / pdb_path.name
+                        try:
+                            shutil.copy2(pdb_path, dest_path)
+                        except Exception as copy_err:
+                            print(f"Error copying PDB for {json_file}: {copy_err}")
+                    else:
+                        print(f"Warning: No PDB file found for {json_file}")
+                        
         except Exception as e:
             print(f"Error parsing {json_file}: {e}")
             
@@ -155,6 +198,82 @@ def extract_boltz_scores_to_csv(input_dir: str, output_csv: str):
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     df.to_csv(output_csv, index=False)
     print(f"✅ Extracted scores from {len(df)} files to {output_csv}")
+
+
+def filter_protenix_scores(input_dir: str, output_csv: str, threshold_pTM: float = 0.8, threshold_ipTM: float = 0.8):
+    """
+    Recursively finds Protenix `summary_confidence.json` files under `input_dir`,
+    extracts key scores, and writes them to `output_csv`.
+
+    Adds a `passes_threshold` column indicating whether
+    ptm >= threshold_pTM and iptm >= threshold_ipTM.
+    """
+    simple_keys = [
+        "plddt",
+        "gpde",
+        "ptm",
+        "iptm",
+        "ranking_score",
+        "disorder",
+        "num_recycles",
+        "ipsae_pae_cutoff",
+        "ipsae_max",
+        "ipsae_interface_max",
+        "has_clash",
+    ]
+    chain_keys = [
+        "chain_gpde",
+        "chain_ptm",
+        "chain_iptm",
+        "chain_plddt",
+    ]
+
+    data_list = []
+    input_path = Path(input_dir)
+    json_files = list(input_path.rglob("summary_confidence.json"))
+
+    for json_file in tqdm(json_files, desc="Parsing Protenix summary_confidence.json files"):
+        try:
+            with open(json_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            row = {"filename": json_file.name, "filepath": str(json_file)}
+
+            # Top-level scalar metrics
+            for key in simple_keys:
+                row[key] = data.get(key, None)
+
+            # Per-chain metrics (flatten lists)
+            for key in chain_keys:
+                values = data.get(key)
+                if isinstance(values, list):
+                    for idx, val in enumerate(values):
+                        row[f"{key}_{idx}"] = val
+
+            # Threshold flag based on ptm / iptm
+            ptm_val = data.get("ptm")
+            iptm_val = data.get("iptm")
+            passes = (
+                ptm_val is not None
+                and iptm_val is not None
+                and ptm_val >= threshold_pTM
+                and iptm_val >= threshold_ipTM
+            )
+            row["passes_threshold"] = passes
+
+            data_list.append(row)
+
+        except Exception as e:
+            print(f"Error parsing {json_file}: {e}")
+
+    if not data_list:
+        print(f"No Protenix summary_confidence.json files found in {input_dir}")
+        return
+
+    df = pd.DataFrame(data_list)
+    os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    print(f"✅ Extracted Protenix scores from {len(df)} files to {output_csv}")
 
 def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None):
     """
