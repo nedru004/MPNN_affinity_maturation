@@ -346,6 +346,7 @@ def filter_boltz_scores(
                 if pdb_root is not None and threshold_rmsd is not None and threshold_rmsd > 0:
                     passes_rmsd = rmsd_val is not None and rmsd_val <= threshold_rmsd
 
+                row["passes_threshold"] = passes_ptm_ipTM and passes_rmsd
                 data_list.append(row)
 
                 # If this prediction passes all thresholds, copy the appropriate PDB
@@ -389,7 +390,9 @@ def filter_boltz_scores(
     
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     df.to_csv(output_csv, index=False)
+    n_passed = df["passes_threshold"].sum()
     print(f"✅ Extracted scores from {len(df)} files to {output_csv}")
+    print(f"   {int(n_passed)} PDB(s) passed thresholds (pTM ≥ {threshold_pTM}, ipTM ≥ {threshold_ipTM}, RMSD ≤ {threshold_rmsd})")
 
 
 def filter_protenix_scores(
@@ -506,7 +509,9 @@ def filter_protenix_scores(
     df = pd.DataFrame(data_list)
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     df.to_csv(output_csv, index=False)
+    n_passed = df["passes_threshold"].sum()
     print(f"✅ Extracted Protenix scores from {len(df)} files to {output_csv}")
+    print(f"   {int(n_passed)} PDB(s) passed thresholds (pTM ≥ {threshold_pTM}, ipTM ≥ {threshold_ipTM})")
 
 def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None, use_template: bool = False):
     """
@@ -598,8 +603,8 @@ def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None, use_t
             chain_ids = sorted(chains.keys())
             chain_list_str = ", ".join(chain_ids)
             yaml_lines.append("templates:\n")
-            # Use a path next to the YAML file so the CLI can find it easily.
-            yaml_lines.append(f"  - pdb: {cleaned_pdb_path.name}\n")
+            # Use full path so Boltz can find the template regardless of CWD
+            yaml_lines.append(f"  - pdb: {cleaned_pdb_path.resolve()}\n")
             yaml_lines.append(f"    chain_id: [{chain_list_str}]\n")
             yaml_lines.append(f"    template_id: [{chain_list_str}]\n")
 
