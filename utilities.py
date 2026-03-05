@@ -530,28 +530,39 @@ def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None, use_t
     for pdb_file in tqdm(pdb_files, desc="Generating Boltz YAMLs"):
         chains = {}
         last_resi_id = None
+        kept_residues = set()        # (chain_id, resi_id) pairs that map to standard AAs
+        cleaned_atom_lines = []      # lines to write into the cleaned template PDB
         
         with open(pdb_file, "r") as f:
             for line in f:
                 if line.startswith("ATOM"):
                     res_name = line[17:20].strip()
                     chain_id = line[21]
-                    resi_id = line[22:27].strip() # include insertion code if present
+                    resi_id = line[22:27].strip()  # include insertion code if present
                     altloc = line[16]
                     
                     # keep only first altloc (blank, 'A', or '1')
                     if altloc not in [' ', 'A', '1']:
                         continue
-                        
+                    
                     if chain_id not in chains:
                         chains[chain_id] = []
-                        
+                    
                     current_res = (chain_id, resi_id)
+                    aa = three_to_one.get(res_name, 'X')
+
                     # avoid sequence duplication if atom for same residue appears consecutively
                     if last_resi_id != current_res:
-                        chains[chain_id].append(three_to_one.get(res_name, 'X'))
+                        # Only include residues that map to a standard amino acid
+                        if aa != 'X':
+                            chains[chain_id].append(aa)
+                            kept_residues.add(current_res)
                         last_resi_id = current_res
-                        
+
+                    # If this residue is part of the cleaned sequence, keep its atoms
+                    if current_res in kept_residues:
+                        cleaned_atom_lines.append(line)
+        
         if not chains:
             print(f"Warning: No ATOM lines found in {pdb_file}")
             continue
@@ -560,25 +571,35 @@ def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None, use_t
         # Ensure deterministic ordering of chains
         for chain_id in sorted(chains.keys()):
             seq_list = chains[chain_id]
-            # remove unrecognised amino acids ('X') that might act as weird gaps
-            seq_str = "".join(seq_list).replace('X', '')
-            if seq_str:
-                yaml_lines.append("  - protein:\n")
-                yaml_lines.append(f"      id: {chain_id}\n")
-                yaml_lines.append(f"      sequence: {seq_str}\n")
-                if use_template:
-                    # when using templates, request an empty MSA so Boltz
-                    # uses only the provided template information
-                    yaml_lines.append("      msa: empty\n")
+            if not seq_list:
+                continue
+            seq_str = "".join(seq_list)
+            yaml_lines.append("  - protein:\n")
+            yaml_lines.append(f"      id: {chain_id}\n")
+            yaml_lines.append(f"      sequence: {seq_str}\n")
+            if use_template:
+                # when using templates, request an empty MSA so Boltz
+                # uses only the provided template information
+                yaml_lines.append("      msa: empty\n")
 
+        cleaned_pdb_path = None
         if use_template:
-            # Add a single templates block that references the original PDB.
+            # Write a cleaned template PDB containing only the residues
+            # that appear in the sequences above and only protein ATOM records.
+            cleaned_pdb_path = Path(output_dir) / f"{pdb_file.stem}_template.pdb"
+            with open(cleaned_pdb_path, "w") as tpl_f:
+                for line in cleaned_atom_lines:
+                    tpl_f.write(line)
+                tpl_f.write("END\n")
+
+            # Add a single templates block that references the cleaned PDB.
             # Boltz will assign template chain IDs incrementally (A1, A2, B1, etc)
             # based on the chain names present in the PDB file.
             chain_ids = sorted(chains.keys())
             chain_list_str = ", ".join(chain_ids)
             yaml_lines.append("templates:\n")
-            yaml_lines.append(f"  - pdb: {pdb_file}\n")
+            # Use a path next to the YAML file so the CLI can find it easily.
+            yaml_lines.append(f"  - pdb: {cleaned_pdb_path.name}\n")
             yaml_lines.append(f"    chain_id: [{chain_list_str}]\n")
             yaml_lines.append(f"    template_id: [{chain_list_str}]\n")
 
