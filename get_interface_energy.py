@@ -83,10 +83,10 @@ def get_residue_pairs_within_distance(pdb_file, binder_id, target_id, distance_t
 #####################################
 
 def plot_score(df, plot_path):
-    # 生成透视表，构造二维矩阵
+    # Generate a pivot table to construct a 2D matrix
     heatmap_data = df.pivot(index="target_res", columns="binder_res", values="total")
 
-    # 画热力图
+    # Plot the heatmap
     plt.figure(figsize=(6, 5))
     sns.heatmap(heatmap_data, cmap="coolwarm", fmt=".1f", vmin=-5, vmax=1)
 

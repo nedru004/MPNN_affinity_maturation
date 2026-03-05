@@ -32,12 +32,12 @@ def adding_aatype(csv, before_pdb_dir, pdb_output_dir):
     }
 
     df = pd.read_csv(csv)
-    print(f"📄 CSV 条目数: {df.shape[0]}")
+    print(f"📄 CSV rows: {df.shape[0]}")
     os.makedirs(pdb_output_dir, exist_ok=True)
 
-    # 获取 before_pdb_dir 中存在的 pdb 文件名集合
+    # Get the set of PDB filenames that exist in before_pdb_dir
     existing_pdbs = set(os.path.basename(p) for p in glob.glob(f'{before_pdb_dir}/*.pdb'))
-    print(f"📂 before_pdb_dir 中包含 {len(existing_pdbs)} 个 PDB 文件")
+    print(f"📂 before_pdb_dir contains {len(existing_pdbs)} PDB files")
     # print(f'existing_pdbs: {existing_pdbs}')
 
     count = 0
@@ -47,18 +47,18 @@ def adding_aatype(csv, before_pdb_dir, pdb_output_dir):
         # pdb_name = os.path.basename(pdb_path)
         # print(f'pdb_name: {pdb_name}')
 
-        # 确保该文件在 before_pdb_dir 中存在
+        # Ensure that this file exists in before_pdb_dir
         if pdb_name not in existing_pdbs:
-            # print('找不到 是不是linkpath忘记写后缀了? ')
+            # print('Not found. Did you forget to include the linkpath suffix?')
             continue
 
         full_pdb_path = os.path.join(before_pdb_dir, pdb_name)
         print(full_pdb_path)
         if not os.path.exists(full_pdb_path):
-            print(f"⚠️ 找不到文件: {full_pdb_path}")
+            print(f"⚠️ File not found: {full_pdb_path}")
             continue
 
-        # 读取原始 PDB 文件
+        # Read the original PDB file
         with open(full_pdb_path, "r") as f:
             pdb_lines = f.readlines()
 
@@ -73,10 +73,10 @@ def adding_aatype(csv, before_pdb_dir, pdb_output_dir):
                     last_resi = resi
 
         if len(res_indices) != len(sequence):
-            print(f"⚠️ 残基数不匹配: {pdb_name}, res={len(res_indices)}, seq={len(sequence)}")
+            print(f"⚠️ Residue count mismatch: {pdb_name}, res={len(res_indices)}, seq={len(sequence)}")
             continue
 
-        # 替换残基名称
+        # Replace residue names
         resi_to_resname = {
             resi: one_to_three.get(aa, "UNK")
             for resi, aa in zip(res_indices, sequence)
@@ -91,16 +91,16 @@ def adding_aatype(csv, before_pdb_dir, pdb_output_dir):
                     line = line[:17] + new_resname.ljust(3) + line[20:]
             new_lines.append(line)
 
-        # 输出路径带上 seq_idx
+        # Include seq_idx in the output path
         output_pdb = os.path.join(pdb_output_dir, os.path.basename(row["link_name"]).replace(".pdb", f"_{row['seq_idx']}.pdb"))
         with open(output_pdb, "w") as f:
             f.writelines(new_lines)
 
         count += 1
-        print(f"✅ 成功处理: {pdb_name}")
+        print(f"✅ Successfully processed: {pdb_name}")
 
 
-    print(f"✅ 总共生成了 {count} 个文件")
+    print(f"✅ Generated {count} files in total")
 
 
 def prepare_pdbs_from_dir(pdb_dir, pdb_output_dir):
@@ -176,11 +176,11 @@ class Sampler(object):
                 print(f'use_gt_masks: {self.use_gt_masks}')
 
                 if self.use_gt_masks:
-                    chi_mask = chi_mask_true.to(aa_num)  #根据每一个氨基酸确定chi角是否存在
+                    chi_mask = chi_mask_true.to(aa_num)  # Determine whether each amino acid has chi angles
                     chi_mask = chi_mask[aa_num]
-                    batch.chi_mask = chi_mask   #根据标准表（chi_mask_true），重新设置每个残基该有的chi角mask。
+                    batch.chi_mask = chi_mask   # Reset chi-angle masks for each residue according to the standard table (chi_mask_true).
 
-                    atom_mask = atom_mask_true.to(atom_mask)  #直接把14个原子都mask
+                    atom_mask = atom_mask_true.to(atom_mask)  # Mask all 14 atoms directly
                     atom_mask = atom_mask[aa_num]
                     batch.atom_mask = atom_mask
 
@@ -338,7 +338,7 @@ if __name__ == '__main__':
         # Use all PDBs in directory directly (no CSV)
         prepare_pdbs_from_dir(before_pdb_dir, after_pdb_dir_batch)
 
-    # 复制after pdb到同一个文件夹中，bu分batch
+    # Copy all "after" PDBs into a single folder (merge batches)
     after_pdbs = os.path.join(os.path.dirname(args.save_dir), 'after_pdbs')
     os.makedirs(after_pdbs, exist_ok=True)
 
@@ -351,7 +351,7 @@ if __name__ == '__main__':
     for src_file in all_after_pdbs:
         dst_file = os.path.join(after_pdbs, os.path.basename(src_file))
         shutil.copy2(src_file, dst_file)
-    print(f"✅ 所有批次文件已复制到 {after_pdbs}")
+    print(f"✅ All batch files have been copied to {after_pdbs}")
 
 
     
