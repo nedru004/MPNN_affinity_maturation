@@ -7,6 +7,82 @@ from Bio import SeqIO
 import json
 from pathlib import Path
 import shutil
+from typing import Optional, Dict, List
+
+
+def _build_pdb_index(pdb_root: Path) -> Dict[str, List[Path]]:
+    """
+    Recursively index all PDB files under `pdb_root` by stem.
+    """
+    index: Dict[str, List[Path]] = {}
+    for pdb_file in pdb_root.rglob("*.pdb"):
+        index.setdefault(pdb_file.stem, []).append(pdb_file)
+    return index
+
+
+def _candidate_names_from_path(json_file: Path, extra_candidates: Optional[List[str]] = None) -> List[str]:
+    """
+    Derive candidate names for matching a JSON file to an original PDB
+    based on its filename and containing folders.
+    """
+    candidates: List[str] = []
+
+    # Start with the JSON stem
+    candidates.append(json_file.stem)
+
+    # Add up to a few parent folder names (closest first)
+    parent = json_file.parent
+    for _ in range(3):
+        if parent is None or parent == parent.parent:
+            break
+        candidates.append(parent.name)
+        parent = parent.parent
+
+    # Add any extra supplied candidates (e.g., stripped prefixes)
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+
+    # Deduplicate while preserving order
+    seen = set()
+    ordered: List[str] = []
+    for name in candidates:
+        if name not in seen:
+            seen.add(name)
+            ordered.append(name)
+
+    return ordered
+
+
+def _find_matching_pdb(
+    json_file: Path,
+    pdb_index: Dict[str, List[Path]],
+    extra_candidates: Optional[List[str]] = None,
+) -> Optional[Path]:
+    """
+    Try to find a PDB in `pdb_index` that matches this JSON file.
+
+    Matching strategy:
+    - First try direct stem matches against candidate names.
+    - Then fall back to prefix/substring heuristics.
+    """
+    if not pdb_index:
+        return None
+
+    candidates = _candidate_names_from_path(json_file, extra_candidates)
+    stems = list(pdb_index.keys())
+
+    # Direct equality on stem
+    for name in candidates:
+        if name in pdb_index:
+            return pdb_index[name][0]
+
+    # Heuristics: prefix / substring matches
+    for name in candidates:
+        for stem in stems:
+            if stem.startswith(name) or name.startswith(stem) or name in stem:
+                return pdb_index[stem][0]
+
+    return None
 
 # merge key residues into one pdb file
 def process_pdb_mutation_and_renumber(csv, pdb_output_dir, 
@@ -107,7 +183,14 @@ def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb")
 
     print(f"✅ Processing complete! {len(seen_seqs)} unique sequences have been written to: {output_csv}")
 
-def filter_boltz_scores(input_dir: str, output_csv: str, output_dir: str, threshold_pTM = 0.8, threshold_ipTM = 0.8):
+def filter_boltz_scores(
+    input_dir: str,
+    output_csv: str,
+    output_dir: str,
+    original_pdb_dir: Optional[str] = None,
+    threshold_pTM: float = 0.8,
+    threshold_ipTM: float = 0.8,
+):
     """
     Extracts scores from Boltz JSON files in the given directory (including subdirectories)
     and outputs them to a CSV file.
@@ -130,6 +213,17 @@ def filter_boltz_scores(input_dir: str, output_csv: str, output_dir: str, thresh
     
     # Ensure output directory for selected PDBs exists
     os.makedirs(output_dir, exist_ok=True)
+
+    # If an original PDB root is provided, index its contents once
+    pdb_root: Optional[Path] = None
+    pdb_index: Dict[str, List[Path]] = {}
+    if original_pdb_dir is not None:
+        pdb_root = Path(original_pdb_dir)
+        if not pdb_root.exists():
+            print(f"Warning: original PDB directory {original_pdb_dir} does not exist; falling back to local JSON directory search.")
+            pdb_root = None
+        else:
+            pdb_index = _build_pdb_index(pdb_root)
 
     for json_file in tqdm(json_files, desc="Parsing JSON files"):
         try:
@@ -157,34 +251,62 @@ def filter_boltz_scores(input_dir: str, output_csv: str, output_dir: str, thresh
                     and ptm_val >= threshold_pTM
                     and iptm_val >= threshold_ipTM
                 ):
-                    # Heuristic: assume the PDB lives next to the JSON and shares its stem,
-                    # optionally without a leading "confidence_" prefix.
-                    json_stem = json_file.stem
-                    candidate_stems = {json_stem}
-                    if json_stem.startswith("confidence_"):
-                        candidate_stems.add(json_stem[len("confidence_"):])
+                    pdb_path: Optional[Path] = None
 
-                    pdb_path = None
-                    for pdb_file in json_file.parent.glob("*.pdb"):
-                        if pdb_file.stem in candidate_stems:
-                            pdb_path = pdb_file
-                            break
+                    if pdb_root is not None:
+                        # Use the original PDB directory structure
+                        extra_candidates: List[str] = []
+                        json_stem = json_file.stem
+                        if json_stem.startswith("confidence_"):
+                            extra_candidates.append(json_stem[len("confidence_"):])
 
-                    if pdb_path is None:
-                        # Fall back to a looser match: stem substring match
+                        pdb_path = _find_matching_pdb(json_file, pdb_index, extra_candidates)
+
+                        if pdb_path is not None and pdb_path.is_file():
+                            # Preserve original folder structure under output_dir
+                            try:
+                                rel_path = pdb_path.relative_to(pdb_root)
+                            except ValueError:
+                                # If for some reason it's not under pdb_root, just flatten
+                                rel_path = pdb_path.name
+
+                            dest_path = Path(output_dir) / rel_path
+                            dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+                            try:
+                                shutil.copy2(pdb_path, dest_path)
+                            except Exception as copy_err:
+                                print(f"Error copying PDB for {json_file}: {copy_err}")
+                        else:
+                            print(f"Warning: No original PDB file found for {json_file}")
+                    else:
+                        # Fallback: assume the PDB lives next to the JSON and shares its stem,
+                        # optionally without a leading "confidence_" prefix.
+                        json_stem = json_file.stem
+                        candidate_stems = {json_stem}
+                        if json_stem.startswith("confidence_"):
+                            candidate_stems.add(json_stem[len("confidence_"):])
+
                         for pdb_file in json_file.parent.glob("*.pdb"):
-                            if any(stem in pdb_file.stem for stem in candidate_stems):
+                            if pdb_file.stem in candidate_stems:
                                 pdb_path = pdb_file
                                 break
 
-                    if pdb_path is not None and pdb_path.is_file():
-                        dest_path = Path(output_dir) / pdb_path.name
-                        try:
-                            shutil.copy2(pdb_path, dest_path)
-                        except Exception as copy_err:
-                            print(f"Error copying PDB for {json_file}: {copy_err}")
-                    else:
-                        print(f"Warning: No PDB file found for {json_file}")
+                        if pdb_path is None:
+                            # Fall back to a looser match: stem substring match
+                            for pdb_file in json_file.parent.glob("*.pdb"):
+                                if any(stem in pdb_file.stem for stem in candidate_stems):
+                                    pdb_path = pdb_file
+                                    break
+
+                        if pdb_path is not None and pdb_path.is_file():
+                            dest_path = Path(output_dir) / pdb_path.name
+                            try:
+                                shutil.copy2(pdb_path, dest_path)
+                            except Exception as copy_err:
+                                print(f"Error copying PDB for {json_file}: {copy_err}")
+                        else:
+                            print(f"Warning: No PDB file found for {json_file}")
                         
         except Exception as e:
             print(f"Error parsing {json_file}: {e}")
@@ -200,7 +322,14 @@ def filter_boltz_scores(input_dir: str, output_csv: str, output_dir: str, thresh
     print(f"✅ Extracted scores from {len(df)} files to {output_csv}")
 
 
-def filter_protenix_scores(input_dir: str, output_csv: str, threshold_pTM: float = 0.8, threshold_ipTM: float = 0.8):
+def filter_protenix_scores(
+    input_dir: str,
+    output_csv: str,
+    output_dir: str,
+    original_pdb_dir: Optional[str] = None,
+    threshold_pTM: float = 0.8,
+    threshold_ipTM: float = 0.8,
+):
     """
     Recursively finds Protenix `summary_confidence.json` files under `input_dir`,
     extracts key scores, and writes them to `output_csv`.
@@ -232,6 +361,20 @@ def filter_protenix_scores(input_dir: str, output_csv: str, threshold_pTM: float
     input_path = Path(input_dir)
     json_files = list(input_path.rglob("summary_confidence.json"))
 
+    # Ensure output directory for selected PDBs exists
+    os.makedirs(output_dir, exist_ok=True)
+
+    # If an original PDB root is provided, index its contents once
+    pdb_root: Optional[Path] = None
+    pdb_index: Dict[str, List[Path]] = {}
+    if original_pdb_dir is not None:
+        pdb_root = Path(original_pdb_dir)
+        if not pdb_root.exists():
+            print(f"Warning: original PDB directory {original_pdb_dir} does not exist; PDBs will not be copied.")
+            pdb_root = None
+        else:
+            pdb_index = _build_pdb_index(pdb_root)
+
     for json_file in tqdm(json_files, desc="Parsing Protenix summary_confidence.json files"):
         try:
             with open(json_file, "r", encoding="utf-8") as f:
@@ -261,6 +404,26 @@ def filter_protenix_scores(input_dir: str, output_csv: str, threshold_pTM: float
             )
             row["passes_threshold"] = passes
 
+            # If this prediction passes the thresholds, try to copy the matching PDB
+            if passes and pdb_root is not None:
+                pdb_path = _find_matching_pdb(json_file, pdb_index)
+
+                if pdb_path is not None and pdb_path.is_file():
+                    try:
+                        rel_path = pdb_path.relative_to(pdb_root)
+                    except ValueError:
+                        rel_path = pdb_path.name
+
+                    dest_path = Path(output_dir) / rel_path
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+                    try:
+                        shutil.copy2(pdb_path, dest_path)
+                    except Exception as copy_err:
+                        print(f"Error copying PDB for {json_file}: {copy_err}")
+                else:
+                    print(f"Warning: No original PDB file found for {json_file}")
+
             data_list.append(row)
 
         except Exception as e:
@@ -275,7 +438,7 @@ def filter_protenix_scores(input_dir: str, output_csv: str, threshold_pTM: float
     df.to_csv(output_csv, index=False)
     print(f"✅ Extracted Protenix scores from {len(df)} files to {output_csv}")
 
-def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None):
+def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None, use_template: bool = False):
     """
     Reads all PDB files from a directory, extracts the sequence for each chain,
     and outputs a .yaml file formatted for Boltz prediction for each PDB.
@@ -324,14 +487,31 @@ def generate_boltz_yamls_from_pdbs(input_dir: str, output_dir: str = None):
             continue
             
         yaml_lines = ["version: 1\nsequences:\n"]
-        for chain_id, seq_list in chains.items():
+        # Ensure deterministic ordering of chains
+        for chain_id in sorted(chains.keys()):
+            seq_list = chains[chain_id]
             # remove unrecognised amino acids ('X') that might act as weird gaps
             seq_str = "".join(seq_list).replace('X', '')
             if seq_str:
                 yaml_lines.append("  - protein:\n")
                 yaml_lines.append(f"      id: {chain_id}\n")
                 yaml_lines.append(f"      sequence: {seq_str}\n")
-                
+                if use_template:
+                    # when using templates, request an empty MSA so Boltz
+                    # uses only the provided template information
+                    yaml_lines.append("      msa: empty\n")
+
+        if use_template:
+            # Add a single templates block that references the original PDB.
+            # Boltz will assign template chain IDs incrementally (A1, A2, B1, etc)
+            # based on the chain names present in the PDB file.
+            chain_ids = sorted(chains.keys())
+            chain_list_str = ", ".join(chain_ids)
+            yaml_lines.append("templates:\n")
+            yaml_lines.append(f"  - pdb: {pdb_file}\n")
+            yaml_lines.append(f"    chain_id: [{chain_list_str}]\n")
+            yaml_lines.append(f"    template_id: [{chain_list_str}]\n")
+
         output_yaml = Path(output_dir) / f"{pdb_file.stem}.yaml"
         with open(output_yaml, "w") as f:
             f.writelines(yaml_lines)
