@@ -2,49 +2,53 @@
 
 ### Overview
 
-This repository contains a small toolkit for protein interface design and affinity maturation built around:
+This repository contains a toolkit for protein interface design and affinity maturation built around:
 
 - **ProteinMPNN** (vendored in `ProteinMPNN/`) for sequence design given a fixed backbone.
 - **FlowPacker**-style side-chain sampling for generating all-atom models from designed sequences (`flowpacker_sampler_pipe.py`, `sampler_pdb_colab.py`).
-- **Interface energy analysis** tools using Rosetta log files (`get_interface_energy.py`) or direct PyRosetta scoring (`per_residue_energy_pyrosetta.py`).
+- **Interface energy analysis** using Rosetta log files (`get_interface_energy.py`) or PyRosetta (`per_residue_energy_pyrosetta.py`).
+- An **end-to-end design pipeline** (`run_design_pipeline.py` / `run_design_pipeline.ipynb`) that chains MPNN → FlowPacker → structure scoring (Boltz or Protenix) → PyRosetta interface energy → motif merging for iterative affinity maturation.
+- **Utilities** (`utilities.py`) for FASTA→CSV conversion, Boltz/Protenix score filtering, PDB mutation/renumbering, and RMSD.
 
 The typical use case is to:
 
 1. Design sequences on a protein–protein complex backbone with ProteinMPNN.
 2. Build side-chain conformations with FlowPacker.
-3. Quantify per-residue and pairwise interface energies to guide affinity maturation.
+3. Optionally score structures with **Boltz** or **Protenix** and filter by pTM/iPTM (and RMSD).
+4. Compute per-residue interface energies with PyRosetta and merge key residues into motif PDBs for the next round.
 
 For details on core ProteinMPNN functionality, see the upstream README in `ProteinMPNN/README.md`.
 
-### Interactive notebook
+### Interactive notebooks
 
-You can explore a small example interactively in Google Colab:
+Run the pipeline or explore examples in Google Colab:
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nedru004/MPNN_affinity_maturation/blob/main/test_notebook.ipynb)
+| Notebook | Description |
+|----------|-------------|
+| [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nedru004/MPNN_affinity_maturation/blob/main/run_design_pipeline.ipynb) | **Run design pipeline** – Full end-to-end pipeline (MPNN → FlowPacker → Boltz/Protenix → PyRosetta → merge motif PDBs). |
+| [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/nedru004/MPNN_affinity_maturation/blob/main/test_notebook.ipynb) | **Test notebook** – Scratch notebook for interactive experimentation. |
 
 ### Repository layout
 
 - `ProteinMPNN/` – Upstream ProteinMPNN code, license, and README.
   - `protein_mpnn_run.py` – Main ProteinMPNN design script (see its README for flags and examples).
   - `protein_mpnn_utils.py` and `helper_scripts/` – Utilities for parsing PDBs, defining designed/fixed chains, tying positions, biasing AAs, etc.
+- `run_design_pipeline.py` – **End-to-end pipeline script**: MPNN design → FlowPacker side-chain sampling → optional Boltz/Protenix structure scoring → PyRosetta interface energy → merge key residues into motif PDBs. Can be run from the CLI or imported for custom workflows.
+- `run_design_pipeline.ipynb` – Notebook wrapper around `run_design_pipeline.py` for running the full pipeline in Colab or locally.
+- `utilities.py` – Shared helpers: `direct_fasta_to_csv` (MPNN FASTA → sampler CSV), `process_pdb_mutation_and_renumber` (key-residue mutations and chain renumbering), `filter_boltz_scores` / `filter_protenix_scores` (score extraction and PDB filtering by pTM/iPTM/RMSD), `generate_boltz_yamls_from_pdbs`, plus PDB indexing and CA-aligned RMSD for score filtering.
 - `flowpacker_sampler_pipe.py` – FlowPacker-based sampling pipeline that:
   - Pre-processes PDBs based on a CSV of sequences.
   - Runs a trained FlowPacker model to generate side-chain conformations.
   - Writes sampled PDBs and basic side-chain/chi metrics.
-- `sampler_pdb_colab.py` – Earlier/alternative script for running the same FlowPacker sampler, with support for:
-  - Supplying either a CSV with sequences **or** a directory of PDBs.
-  - Preparing batch PDBs for the FlowPacker dataloader.
+- `sampler_pdb_colab.py` – Alternative FlowPacker sampler used by the design pipeline; supports CSV or directory input.
 - `get_interface_energy.py` – Post-processing script for **Rosetta** output logs:
   - Parses per–residue–pair energies from Rosetta `.out` files.
   - Identifies interface residue pairs based on Cβ/Cα distances.
   - Aggregates and plots per-residue interface energies on the binder chain.
-- `per_residue_energy_pyrosetta.py` – Pure **PyRosetta** version of the interface energy analysis:
-  - Runs a FastRelax-like protocol around the interface.
-  - Computes pairwise residue energies directly via PyRosetta scoring.
-  - Produces CSVs and plots similar to `get_interface_energy.py`.
-- `test/` – Example PDBs (e.g. `4dn4_ccl2_8_4.pdb` and processed variants) for testing the pipeline.
+- `per_residue_energy_pyrosetta.py` – **PyRosetta** interface energy analysis: optional XML protocol or built-in FastRelax-like protocol; computes pairwise energies and supports `--energy_threshold` to output key residues for motif merging (`fixed_residue_pyrosetta.csv`); produces CSVs and heatmaps.
+- `test/` – Example PDBs (e.g. `4dn4_ccl2_8_4.pdb`) and pipeline outputs (`mpnn_out`, `flowpacker_out`, `boltz_out`, `protenix_scores`, `filtered_pdb`, `merge_motif_pdb`) when using the design pipeline.
 - `test_notebook.ipynb` – Scratch notebook for interactive experimentation.
-- `requirements.txt` – Minimal Python requirements used during development (currently only `torch` is pinned; see below for additional dependencies).
+- `requirements.txt` – Minimal Python requirements (see below for full dependency list).
 
 ### Dependencies and installation
 
@@ -56,8 +60,10 @@ You will typically want a recent Python (≥3.9) and CUDA-enabled PyTorch for no
   - `torch` (if not already installed to match your CUDA stack)
 - **External toolkits**:
   - **ProteinMPNN** – Uses PyTorch; follow instructions in `ProteinMPNN/README.md` for model weights.
-  - **FlowPacker** – This repo expects a separate FlowPacker installation.
-  - **PyRosetta** – Required only for `per_residue_energy_pyrosetta.py` (licensed distribution; install from the official PyRosetta source).
+  - **FlowPacker** – Required for side-chain sampling; the design pipeline expects it (e.g. at `/content/flowpacker` in Colab).
+  - **PyRosetta** – Required for `per_residue_energy_pyrosetta.py` and the design pipeline (licensed distribution).
+  - **Boltz** (optional) – For the structure-scoring step in `run_design_pipeline`; install and activate a Boltz env (e.g. `boltz_env`) if using `--run_boltz`.
+  - **Protenix** (optional) – For Protenix-based scoring in the pipeline; required only if using `--run_protenix`.
   - **Rosetta** (optional) – Only needed if you want to consume existing Rosetta `.out` logs with `get_interface_energy.py`.
 
 A minimal setup might look like:
@@ -96,6 +102,33 @@ python protein_mpnn_run.py \
 ```
 
 This produces designed sequences (e.g. in FASTA/JSONL form) that can be fed into the FlowPacker sampling step.
+
+### End-to-end design pipeline (`run_design_pipeline.py` / `run_design_pipeline.ipynb`)
+
+The pipeline runs five steps in sequence:
+
+1. **MPNN sequence design** – Parses input PDBs, assigns fixed/designed chains, runs ProteinMPNN (with and without AA bias), and converts FASTA outputs to a CSV for FlowPacker.
+2. **FlowPacker** – Builds all-atom models from the MPNN sequences using `sampler_pdb_colab.py`.
+3. **Structure scoring** – Optionally runs **Boltz** and/or **Protenix** on the FlowPacker PDBs, then filters by pTM, iPTM, and (for Boltz) CA-RMSD to a reference.
+4. **PyRosetta interface energy** – Runs `per_residue_energy_pyrosetta.py` on filtered PDBs with `--energy_threshold` to identify key interface residues and writes `fixed_residue_pyrosetta.csv`.
+5. **Merge motif PDBs** – Uses `utilities.process_pdb_mutation_and_renumber` to apply key residues and renumber the target chain; output goes to `test/merge_motif_pdb/`, which can be used as the next round’s input PDB directory.
+
+**CLI usage:**
+
+```bash
+python run_design_pipeline.py \
+  --input_pdb_dir path/to/input_pdbs \
+  --working_dir path/to/MPNN_affinity_maturation \
+  --chains_to_design A \
+  --num_seq_per_target 8 \
+  --run_boltz \
+  --binder_chain A \
+  --target_chain M \
+  --interface_dist 10.0 \
+  --energy_threshold -5.0
+```
+
+Use `--run_protenix` to enable Protenix scoring instead of or in addition to Boltz. The notebook `run_design_pipeline.ipynb` is a thin wrapper: set `working_dir`, `input_pdb_dir`, and pipeline flags, then call `run_pipeline(...)`.
 
 ### FlowPacker side-chain sampling (`flowpacker_sampler_pipe.py`)
 
@@ -240,14 +273,17 @@ Outputs:
 
 ### Example end-to-end workflow
 
-An example affinity-maturation workflow using this repository might be:
+The recommended way to run a full round is the **design pipeline** (see above):
 
-1. **Design sequences with ProteinMPNN** on a complex backbone (`ProteinMPNN/protein_mpnn_run.py`), writing sequences to a CSV compatible with `flowpacker_sampler_pipe.py`.
-2. **Sample side chains with FlowPacker** using `flowpacker_sampler_pipe.py`, generating all-atom models for each design.
-3. **Compute interface energies** for each sampled structure:
-   - Either from Rosetta `.out` logs with `get_interface_energy.py`, or
-   - Directly from PDBs with `per_residue_energy_pyrosetta.py`.
-4. **Rank designs** by per-residue or total interface energy and inspect top candidates.
+1. Put input complex PDBs in a directory (e.g. `test/` or `test/merge_motif_pdb` from a previous round).
+2. Run `run_design_pipeline.py` (or `run_design_pipeline.ipynb` in Colab) with `--run_boltz` and/or `--run_protenix` as desired.
+3. The pipeline writes merged motif PDBs to `test/merge_motif_pdb/`; use that as `--input_pdb_dir` for the next iteration.
+
+For more manual control you can still:
+
+- Run **ProteinMPNN** and **FlowPacker** separately (`flowpacker_sampler_pipe.py` or `sampler_pdb_colab.py`).
+- Score structures with Boltz/Protenix and use `utilities.filter_boltz_scores` / `filter_protenix_scores` to get filtered PDBs.
+- Run **interface energy** with `get_interface_energy.py` (Rosetta logs) or `per_residue_energy_pyrosetta.py`, then rank designs by per-residue or total interface energy.
 
 ### Citing ProteinMPNN
 
