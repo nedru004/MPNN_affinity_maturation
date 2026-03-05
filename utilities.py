@@ -4,6 +4,7 @@ import ast
 from tqdm import tqdm
 import csv
 from Bio import SeqIO
+from Bio.PDB import PDBParser, Superimposer
 import json
 from pathlib import Path
 import shutil
@@ -83,6 +84,59 @@ def _find_matching_pdb(
                 return pdb_index[stem][0]
 
     return None
+
+
+def _extract_ca_atoms(structure) -> Dict[tuple, "Atom"]:
+    """
+    Collect CA atoms keyed by (chain_id, residue_number) from the first model.
+    """
+    atoms: Dict[tuple, "Atom"] = {}
+    # Use the first model only for consistency
+    for model in structure:
+        for chain in model:
+            for residue in chain:
+                if "CA" in residue:
+                    # residue.id is a tuple like (' ', resseq, icode)
+                    resseq = residue.id[1]
+                    key = (chain.id, resseq)
+                    atoms[key] = residue["CA"]
+        break
+    return atoms
+
+
+def _compute_aligned_rmsd(original_pdb: Path, predicted_pdb: Path) -> Optional[float]:
+    """
+    Compute CA-aligned RMSD between original and predicted PDB structures.
+
+    Returns None if RMSD cannot be computed (e.g., too few matching residues).
+    """
+    parser = PDBParser(QUIET=True)
+    try:
+        orig_struct = parser.get_structure("orig", str(original_pdb))
+        pred_struct = parser.get_structure("pred", str(predicted_pdb))
+    except Exception as e:
+        print(f"Error parsing PDBs for RMSD ({original_pdb}, {predicted_pdb}): {e}")
+        return None
+
+    orig_atoms = _extract_ca_atoms(orig_struct)
+    pred_atoms = _extract_ca_atoms(pred_struct)
+
+    common_keys = sorted(set(orig_atoms.keys()) & set(pred_atoms.keys()))
+    if len(common_keys) < 3:
+        # Need at least 3 points to define a stable superposition
+        return None
+
+    fixed_atoms = [orig_atoms[k] for k in common_keys]
+    moving_atoms = [pred_atoms[k] for k in common_keys]
+
+    sup = Superimposer()
+    try:
+        sup.set_atoms(fixed_atoms, moving_atoms)
+    except Exception as e:
+        print(f"Error during RMSD superposition ({original_pdb}, {predicted_pdb}): {e}")
+        return None
+
+    return float(sup.rms)
 
 # merge key residues into one pdb file
 def process_pdb_mutation_and_renumber(csv, pdb_output_dir, 
@@ -190,6 +244,7 @@ def filter_boltz_scores(
     original_pdb_dir: Optional[str] = None,
     threshold_pTM: float = 0.8,
     threshold_ipTM: float = 0.8,
+    threshold_rmsd: float = 2.0,
 ):
     """
     Extracts scores from Boltz JSON files in the given directory (including subdirectories)
@@ -239,74 +294,89 @@ def filter_boltz_scores(
                 if "chains_ptm" in data:
                     for chain_idx, val in data["chains_ptm"].items():
                         row[f"chain_{chain_idx}_ptm"] = val
+                # Determine original and predicted PDB paths for RMSD computation and copying
+                original_pdb_path: Optional[Path] = None
+                predicted_pdb_path: Optional[Path] = None
 
-                data_list.append(row)
+                # Locate original PDB in the provided root (if any)
+                if pdb_root is not None:
+                    extra_candidates: List[str] = []
+                    json_stem = json_file.stem
+                    if json_stem.startswith("confidence_"):
+                        extra_candidates.append(json_stem[len("confidence_"):])
 
-                # If this prediction passes the thresholds, try to copy the matching PDB
+                    original_pdb_path = _find_matching_pdb(json_file, pdb_index, extra_candidates)
+
+                # Locate predicted PDB next to the JSON (Boltz output)
+                json_stem = json_file.stem
+                candidate_stems = {json_stem}
+                if json_stem.startswith("confidence_"):
+                    candidate_stems.add(json_stem[len("confidence_"):])
+
+                for pdb_file in json_file.parent.glob("*.pdb"):
+                    if pdb_file.stem in candidate_stems:
+                        predicted_pdb_path = pdb_file
+                        break
+
+                if predicted_pdb_path is None:
+                    # Fall back to a looser match: stem substring match
+                    for pdb_file in json_file.parent.glob("*.pdb"):
+                        if any(stem in pdb_file.stem for stem in candidate_stems):
+                            predicted_pdb_path = pdb_file
+                            break
+
+                # Compute RMSD if we have both original and predicted structures
+                rmsd_val: Optional[float] = None
+                if original_pdb_path is not None and predicted_pdb_path is not None:
+                    rmsd_val = _compute_aligned_rmsd(original_pdb_path, predicted_pdb_path)
+                row["rmsd"] = rmsd_val
+
+                # Record scores and determine if this prediction passes thresholds
                 ptm_val = data.get("ptm")
                 iptm_val = data.get("iptm")
-                if (
+                passes_ptm_ipTM = (
                     ptm_val is not None
                     and iptm_val is not None
                     and ptm_val >= threshold_pTM
                     and iptm_val >= threshold_ipTM
-                ):
-                    pdb_path: Optional[Path] = None
+                )
+
+                passes_rmsd = True
+                # Apply RMSD filter only when we have an original PDB root and a positive threshold
+                if pdb_root is not None and threshold_rmsd is not None and threshold_rmsd > 0:
+                    passes_rmsd = rmsd_val is not None and rmsd_val <= threshold_rmsd
+
+                data_list.append(row)
+
+                # If this prediction passes all thresholds, copy the appropriate PDB
+                if passes_ptm_ipTM and passes_rmsd:
+                    pdb_path_to_copy: Optional[Path] = None
+                    dest_path: Optional[Path] = None
 
                     if pdb_root is not None:
-                        # Use the original PDB directory structure
-                        extra_candidates: List[str] = []
-                        json_stem = json_file.stem
-                        if json_stem.startswith("confidence_"):
-                            extra_candidates.append(json_stem[len("confidence_"):])
-
-                        pdb_path = _find_matching_pdb(json_file, pdb_index, extra_candidates)
-
-                        if pdb_path is not None and pdb_path.is_file():
-                            # Preserve original folder structure under output_dir
+                        # Copy the original PDB, preserving folder structure under output_dir
+                        pdb_path_to_copy = original_pdb_path
+                        if pdb_path_to_copy is not None and pdb_path_to_copy.is_file():
                             try:
-                                rel_path = pdb_path.relative_to(pdb_root)
+                                rel_path = pdb_path_to_copy.relative_to(pdb_root)
                             except ValueError:
                                 # If for some reason it's not under pdb_root, just flatten
-                                rel_path = pdb_path.name
-
+                                rel_path = pdb_path_to_copy.name
                             dest_path = Path(output_dir) / rel_path
-                            dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-                            try:
-                                shutil.copy2(pdb_path, dest_path)
-                            except Exception as copy_err:
-                                print(f"Error copying PDB for {json_file}: {copy_err}")
-                        else:
-                            print(f"Warning: No original PDB file found for {json_file}")
                     else:
-                        # Fallback: assume the PDB lives next to the JSON and shares its stem,
-                        # optionally without a leading "confidence_" prefix.
-                        json_stem = json_file.stem
-                        candidate_stems = {json_stem}
-                        if json_stem.startswith("confidence_"):
-                            candidate_stems.add(json_stem[len("confidence_"):])
+                        # No original root provided: copy the predicted PDB itself
+                        pdb_path_to_copy = predicted_pdb_path
+                        if pdb_path_to_copy is not None and pdb_path_to_copy.is_file():
+                            dest_path = Path(output_dir) / pdb_path_to_copy.name
 
-                        for pdb_file in json_file.parent.glob("*.pdb"):
-                            if pdb_file.stem in candidate_stems:
-                                pdb_path = pdb_file
-                                break
-
-                        if pdb_path is None:
-                            # Fall back to a looser match: stem substring match
-                            for pdb_file in json_file.parent.glob("*.pdb"):
-                                if any(stem in pdb_file.stem for stem in candidate_stems):
-                                    pdb_path = pdb_file
-                                    break
-
-                        if pdb_path is not None and pdb_path.is_file():
-                            dest_path = Path(output_dir) / pdb_path.name
-                            try:
-                                shutil.copy2(pdb_path, dest_path)
-                            except Exception as copy_err:
-                                print(f"Error copying PDB for {json_file}: {copy_err}")
-                        else:
-                            print(f"Warning: No PDB file found for {json_file}")
+                    if pdb_path_to_copy is not None and dest_path is not None:
+                        dest_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            shutil.copy2(pdb_path_to_copy, dest_path)
+                        except Exception as copy_err:
+                            print(f"Error copying PDB for {json_file}: {copy_err}")
+                    else:
+                        print(f"Warning: No PDB file found for {json_file}")
                         
         except Exception as e:
             print(f"Error parsing {json_file}: {e}")
