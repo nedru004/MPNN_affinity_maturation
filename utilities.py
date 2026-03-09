@@ -4,7 +4,7 @@ import ast
 from tqdm import tqdm
 import csv
 from Bio import SeqIO
-from Bio.PDB import PDBParser, Superimposer
+from Bio.PDB import PDBParser, MMCIFParser, Superimposer
 import json
 from pathlib import Path
 import shutil
@@ -18,6 +18,17 @@ def _build_pdb_index(pdb_root: Path) -> Dict[str, List[Path]]:
     index: Dict[str, List[Path]] = {}
     for pdb_file in pdb_root.rglob("*.pdb"):
         index.setdefault(pdb_file.stem, []).append(pdb_file)
+    return index
+
+
+def _build_file_index(root: Path, patterns: List[str]) -> Dict[str, List[Path]]:
+    """
+    Recursively index files under `root` by stem for multiple glob patterns.
+    """
+    index: Dict[str, List[Path]] = {}
+    for pattern in patterns:
+        for file_path in root.rglob(pattern):
+            index.setdefault(file_path.stem, []).append(file_path)
     return index
 
 
@@ -86,6 +97,32 @@ def _find_matching_pdb(
     return None
 
 
+def _find_matching_file(
+    source_path: Path,
+    file_index: Dict[str, List[Path]],
+    extra_candidates: Optional[List[str]] = None,
+) -> Optional[Path]:
+    """
+    Find a matching file (PDB/CIF/etc.) from an indexed file set.
+    """
+    if not file_index:
+        return None
+
+    candidates = _candidate_names_from_path(source_path, extra_candidates)
+    stems = list(file_index.keys())
+
+    for name in candidates:
+        if name in file_index:
+            return file_index[name][0]
+
+    for name in candidates:
+        for stem in stems:
+            if stem.startswith(name) or name.startswith(stem) or name in stem:
+                return file_index[stem][0]
+
+    return None
+
+
 def _extract_ca_atoms(structure) -> Dict[tuple, "Atom"]:
     """
     Collect CA atoms keyed by (chain_id, residue_number) from the first model.
@@ -110,10 +147,19 @@ def _compute_aligned_rmsd(original_pdb: Path, predicted_pdb: Path) -> Optional[f
 
     Returns None if RMSD cannot be computed (e.g., too few matching residues).
     """
-    parser = PDBParser(QUIET=True)
     try:
-        orig_struct = parser.get_structure("orig", str(original_pdb))
-        pred_struct = parser.get_structure("pred", str(predicted_pdb))
+        if original_pdb.suffix.lower() == ".cif":
+            orig_parser = MMCIFParser(QUIET=True)
+        else:
+            orig_parser = PDBParser(QUIET=True)
+
+        if predicted_pdb.suffix.lower() == ".cif":
+            pred_parser = MMCIFParser(QUIET=True)
+        else:
+            pred_parser = PDBParser(QUIET=True)
+
+        orig_struct = orig_parser.get_structure("orig", str(original_pdb))
+        pred_struct = pred_parser.get_structure("pred", str(predicted_pdb))
     except Exception as e:
         print(f"Error parsing PDBs for RMSD ({original_pdb}, {predicted_pdb}): {e}")
         return None
@@ -280,6 +326,9 @@ def filter_boltz_scores(
         else:
             pdb_index = _build_pdb_index(pdb_root)
 
+    # Index predicted structures under input_dir (Boltz outputs may be nested and/or CIF)
+    predicted_index = _build_file_index(input_path, ["*.pdb", "*.cif"])
+
     for json_file in tqdm(json_files, desc="Parsing JSON files"):
         try:
             with open(json_file, 'r', encoding='utf-8') as f:
@@ -307,29 +356,20 @@ def filter_boltz_scores(
 
                     original_pdb_path = _find_matching_pdb(json_file, pdb_index, extra_candidates)
 
-                # Locate predicted PDB next to the JSON (Boltz output)
+                # Locate predicted structure from indexed outputs
                 json_stem = json_file.stem
-                candidate_stems = {json_stem}
+                extra_candidates: List[str] = []
                 if json_stem.startswith("confidence_"):
-                    candidate_stems.add(json_stem[len("confidence_"):])
-
-                for pdb_file in json_file.parent.glob("*.pdb"):
-                    if pdb_file.stem in candidate_stems:
-                        predicted_pdb_path = pdb_file
-                        break
-
-                if predicted_pdb_path is None:
-                    # Fall back to a looser match: stem substring match
-                    for pdb_file in json_file.parent.glob("*.pdb"):
-                        if any(stem in pdb_file.stem for stem in candidate_stems):
-                            predicted_pdb_path = pdb_file
-                            break
+                    extra_candidates.append(json_stem[len("confidence_"):])
+                predicted_pdb_path = _find_matching_file(json_file, predicted_index, extra_candidates)
 
                 # Compute RMSD if we have both original and predicted structures
                 rmsd_val: Optional[float] = None
                 if original_pdb_path is not None and predicted_pdb_path is not None:
                     rmsd_val = _compute_aligned_rmsd(original_pdb_path, predicted_pdb_path)
                 row["rmsd"] = rmsd_val
+                row["original_pdb_path"] = str(original_pdb_path) if original_pdb_path is not None else None
+                row["predicted_structure_path"] = str(predicted_pdb_path) if predicted_pdb_path is not None else None
 
                 # Record scores and determine if this prediction passes thresholds
                 ptm_val = data.get("ptm")
@@ -391,8 +431,10 @@ def filter_boltz_scores(
     os.makedirs(os.path.dirname(os.path.abspath(output_csv)), exist_ok=True)
     df.to_csv(output_csv, index=False)
     n_passed = df["passes_threshold"].sum()
+    n_rmsd = df["rmsd"].notna().sum() if "rmsd" in df.columns else 0
     print(f"✅ Extracted scores from {len(df)} files to {output_csv}")
     print(f"   {int(n_passed)} PDB(s) passed thresholds (pTM ≥ {threshold_pTM}, ipTM ≥ {threshold_ipTM}, RMSD ≤ {threshold_rmsd})")
+    print(f"   RMSD computed for {int(n_rmsd)}/{len(df)} entries")
 
 
 def filter_protenix_scores(
