@@ -26,18 +26,24 @@ def get_rosetta_result(logfile):
     outdf = pd.DataFrame(outlist[2:], columns=outlist[0])
     return outdf
 
-def get_interchain_score(rosetta_path):
+def get_interchain_score(rosetta_path, residues_of_interest=None):
     raw_score_df = get_rosetta_result(rosetta_path)
     # raw_score_df = pd.read_csv(raw_score_path, sep="\s+")[1:]
     if raw_score_df is None:
         return None
 
-
-    chain_map = {str(i): chr(i) for i in list(range(65, 91)) + list(range(97, 123))}
-    raw_score_df['binder_id'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[:2].map(chain_map)
-    raw_score_df['target_id'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[:2].map(chain_map)
-    raw_score_df['binder_res'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[2:]
-    raw_score_df['target_res'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[2:]
+    # If a mapping is provided, use it; otherwise keep the raw identifiers.
+    if residues_of_interest is None:
+        raw_score_df['binder_id'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[:2]
+        raw_score_df['target_id'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[:2]
+        raw_score_df['binder_res'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[2:]
+        raw_score_df['target_res'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[2:]
+    else:
+        chain_map = {str(i): chr(i) for i in residues_of_interest}
+        raw_score_df['binder_id'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[:2].map(chain_map)
+        raw_score_df['target_id'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[:2].map(chain_map)
+        raw_score_df['binder_res'] = raw_score_df['Res1'].str.split("_", expand=True)[1].str[2:]
+        raw_score_df['target_res'] = raw_score_df['Res2'].str.split("_", expand=True)[1].str[2:]
 
     interchain_score_df = raw_score_df.loc[raw_score_df['binder_id']!=raw_score_df['target_id'],
             ['binder_id', 'target_id', 'binder_res', 'target_res', 'total']]
@@ -57,26 +63,44 @@ def get_cb_or_ca(residue):
     return None
 
 def get_residue_pairs_within_distance(pdb_file, binder_id, target_id, distance_threshold=10.0):
+    """
+    Find residue pairs between a binder chain and one or more target chains
+    whose Cβ/Cα atoms are within a given distance.
 
+    `target_id` can be:
+      - a single chain ID (e.g. "B")
+      - a comma-separated string of chain IDs (e.g. "B,C,D")
+      - an iterable of chain IDs
+    """
     parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure("protein", pdb_file)
     model = structure[0]
     binder_chain = model[binder_id]
-    target_chain = model[target_id]
 
-    selected_pairs = set()  
-    # selected_target = set()
-    # selected_binder = set()
-    for res1 in binder_chain:
-        coord1 = get_cb_or_ca(res1)
-        for res2 in target_chain:
-            coord2 = get_cb_or_ca(res2)
-            if coord1 is not None and coord2 is not None:
-                distance = np.linalg.norm(coord1 - coord2)
-                if distance <= distance_threshold:
-                    selected_pairs.add((res1.id[1], res2.id[1])) 
-                    # selected_target.add(res1.id[1])
-                    # selected_binder.add(res2.id[1])
+    # Normalize target_id to a list of chain IDs
+    if isinstance(target_id, str):
+        if "," in target_id:
+            target_ids = [t.strip() for t in target_id.split(",") if t.strip()]
+        else:
+            target_ids = [target_id]
+    else:
+        target_ids = list(target_id)
+
+    selected_pairs = set()
+
+    for tgt_id in target_ids:
+        if tgt_id not in model:
+            continue
+        target_chain = model[tgt_id]
+
+        for res1 in binder_chain:
+            coord1 = get_cb_or_ca(res1)
+            for res2 in target_chain:
+                coord2 = get_cb_or_ca(res2)
+                if coord1 is not None and coord2 is not None:
+                    distance = np.linalg.norm(coord1 - coord2)
+                    if distance <= distance_threshold:
+                        selected_pairs.add((res1.id[1], res2.id[1]))
 
     return selected_pairs
 
@@ -134,7 +158,7 @@ def get_input_df(args):
 
     return df
 
-def main(row, output_dir="", distance_threshold=10):
+def main(row, output_dir: str = "", distance_threshold: float = 10.0, residues_of_interest=None):
     logfile = row['rosetta_path']
     pdb_file = row['pdbpath']
     binder_id = row['binder_id']
@@ -145,7 +169,7 @@ def main(row, output_dir="", distance_threshold=10):
         if not os.path.exists(logfile):
             print(row)
             print('logfile does not exist')
-        interchain_score_path = get_interchain_score(logfile)
+        interchain_score_path = get_interchain_score(logfile, residues_of_interest=residues_of_interest)
         """step2: get interface pair"""
         interface_pair = get_residue_pairs_within_distance(pdb_file, binder_id, target_id, distance_threshold=distance_threshold)
         # interface_pair = get_residue_pairs_within_distance(pklfile)
@@ -192,6 +216,12 @@ if __name__ == '__main__':
     parser.add_argument('--target_id', type=str, help='target chain id', required=True)
     parser.add_argument('--output_dir', type=str, help='output csv file of all pdb results', required=True)
     parser.add_argument("--interface_dist", type=float, default=12.0, help="interface distance between target and binder")
+    parser.add_argument(
+        "--residues_of_interest",
+        type=str,
+        default=None,
+        help="list of binder residue numbers to analyze; if omitted, all residues are used.",
+    )
 
     args = parser.parse_args()
 
@@ -199,15 +229,23 @@ if __name__ == '__main__':
     interface_dist = args.interface_dist
     os.makedirs(os.path.dirname(output_dir), exist_ok=True)
 
+    residues_of_interest = None
+    if args.residues_of_interest:
+        residues_of_interest = [
+            int(x.strip()) for x in args.residues_of_interest.split(",") if x.strip()
+        ]
+
     df = get_input_df(args)
 
     print("start Pool")
-    # func = partial(main, output_dir=output_dir, distance_threshold=interface_dist)
-    # with Pool(processes=cpu_count())as pool:
-    #     results = list(tqdm(pool.imap(main, [row for _, row in df.iterrows()]), total=len(df)))
 
     # partial with the extra arguments
-    func = partial(main, output_dir=output_dir, distance_threshold=interface_dist)
+    func = partial(
+        main,
+        output_dir=output_dir,
+        distance_threshold=interface_dist,
+        residues_of_interest=residues_of_interest,
+    )
     # correctly use `func` in imap
     with Pool(processes=cpu_count()) as pool:
         results = list(tqdm(pool.imap(func, [row for _, row in df.iterrows()]), total=len(df)))
@@ -221,7 +259,3 @@ if __name__ == '__main__':
     title = f"interface_binder_residues_energy_sum"
     savepath = os.path.join(output_dir, 'residue_energy_interface_binder_residues_energy_sum.png')
     plot_binder_score(os.path.join(output_dir, "residue_energy.csv"), title=title, savepath=savepath)
-
-
-
-
