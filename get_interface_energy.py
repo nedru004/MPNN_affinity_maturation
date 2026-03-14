@@ -63,44 +63,26 @@ def get_cb_or_ca(residue):
     return None
 
 def get_residue_pairs_within_distance(pdb_file, binder_id, target_id, distance_threshold=10.0):
-    """
-    Find residue pairs between a binder chain and one or more target chains
-    whose Cβ/Cα atoms are within a given distance.
 
-    `target_id` can be:
-      - a single chain ID (e.g. "B")
-      - a comma-separated string of chain IDs (e.g. "B,C,D")
-      - an iterable of chain IDs
-    """
     parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure("protein", pdb_file)
     model = structure[0]
     binder_chain = model[binder_id]
+    target_chain = model[target_id]
 
-    # Normalize target_id to a list of chain IDs
-    if isinstance(target_id, str):
-        if "," in target_id:
-            target_ids = [t.strip() for t in target_id.split(",") if t.strip()]
-        else:
-            target_ids = [target_id]
-    else:
-        target_ids = list(target_id)
-
-    selected_pairs = set()
-
-    for tgt_id in target_ids:
-        if tgt_id not in model:
-            continue
-        target_chain = model[tgt_id]
-
-        for res1 in binder_chain:
-            coord1 = get_cb_or_ca(res1)
-            for res2 in target_chain:
-                coord2 = get_cb_or_ca(res2)
-                if coord1 is not None and coord2 is not None:
-                    distance = np.linalg.norm(coord1 - coord2)
-                    if distance <= distance_threshold:
-                        selected_pairs.add((res1.id[1], res2.id[1]))
+    selected_pairs = set()  
+    # selected_target = set()
+    # selected_binder = set()
+    for res1 in binder_chain:
+        coord1 = get_cb_or_ca(res1)
+        for res2 in target_chain:
+            coord2 = get_cb_or_ca(res2)
+            if coord1 is not None and coord2 is not None:
+                distance = np.linalg.norm(coord1 - coord2)
+                if distance <= distance_threshold:
+                    selected_pairs.add((res1.id[1], res2.id[1])) 
+                    # selected_target.add(res1.id[1])
+                    # selected_binder.add(res2.id[1])
 
     return selected_pairs
 

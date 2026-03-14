@@ -1,6 +1,6 @@
 import argparse
 import os
-
+import glob
 import pandas as pd
 import pyrosetta
 from pyrosetta import rosetta
@@ -125,51 +125,58 @@ def compute_interface_pair_energies_with_pyrosetta(
     weights = scorefxn.weights()
     pdb_info = pose.pdb_info()
 
-    # use your existing Biopython-based distance selector to define interface pairs
-    interface_pairs = get_residue_pairs_within_distance(
-        pdb_file, binder_chain, target_chain, distance_threshold=distance_threshold
-    )
+    # Allow multiple target chains, e.g. "A,B,C"
+    if isinstance(target_chain, str) and "," in target_chain:
+        target_chains = [t.strip() for t in target_chain.split(",") if t.strip()]
+    else:
+        target_chains = [target_chain]
 
     rows = []
-    for binder_resnum, target_resnum in interface_pairs:
-        # map PDB numbering (chain, resnum) to pose index
-        i = pdb_info.pdb2pose(binder_chain, binder_resnum)
-        j = pdb_info.pdb2pose(target_chain, target_resnum)
-        if i == 0 or j == 0:
-            continue
+    for tgt_chain in target_chains:
+        # use your existing Biopython-based distance selector to define interface pairs
+        interface_pairs = get_residue_pairs_within_distance(
+            pdb_file, binder_chain, tgt_chain, distance_threshold=distance_threshold
+        )
 
-        # compute pairwise energy for this residue pair using the scorefunction
-        emap = rosetta.core.scoring.EMapVector()
-        # context-independent and context-dependent 2-body energies
-        scorefxn.eval_ci_2b(pose.residue(i), pose.residue(j), pose, emap)
-        scorefxn.eval_cd_2b(pose.residue(i), pose.residue(j), pose, emap)
-
-        # weighted total and per-term contributions over all score types
-        total = 0.0
-        per_term = {}
-        end_enum = int(rosetta.core.scoring.end_of_score_type_enumeration)
-        for st_int in range(1, end_enum):
-            st = rosetta.core.scoring.ScoreType(st_int)
-            w = weights[st]
-            if w == 0.0:
+        for binder_resnum, target_resnum in interface_pairs:
+            # map PDB numbering (chain, resnum) to pose index
+            i = pdb_info.pdb2pose(binder_chain, binder_resnum)
+            j = pdb_info.pdb2pose(tgt_chain, target_resnum)
+            if i == 0 or j == 0:
                 continue
-            val = emap[st]
-            if val == 0.0:
-                continue
-            total += w * val
-            term_name = rosetta.core.scoring.name_from_score_type(st)
-            per_term[term_name] = per_term.get(term_name, 0.0) + val
 
-        row = {
-            "binder_id": binder_chain,
-            "target_id": target_chain,
-            "binder_res": str(binder_resnum),
-            "target_res": str(target_resnum),
-            "total": total,
-        }
-        # add raw (unweighted) per-term energies as separate columns
-        row.update(per_term)
-        rows.append(row)
+            # compute pairwise energy for this residue pair using the scorefunction
+            emap = rosetta.core.scoring.EMapVector()
+            # context-independent and context-dependent 2-body energies
+            scorefxn.eval_ci_2b(pose.residue(i), pose.residue(j), pose, emap)
+            scorefxn.eval_cd_2b(pose.residue(i), pose.residue(j), pose, emap)
+
+            # weighted total and per-term contributions over all score types
+            total = 0.0
+            per_term = {}
+            end_enum = int(rosetta.core.scoring.end_of_score_type_enumeration)
+            for st_int in range(1, end_enum):
+                st = rosetta.core.scoring.ScoreType(st_int)
+                w = weights[st]
+                if w == 0.0:
+                    continue
+                val = emap[st]
+                if val == 0.0:
+                    continue
+                total += w * val
+                term_name = rosetta.core.scoring.name_from_score_type(st)
+                per_term[term_name] = per_term.get(term_name, 0.0) + val
+
+            row = {
+                "binder_id": binder_chain,
+                "target_id": tgt_chain,
+                "binder_res": str(binder_resnum),
+                "target_res": str(target_resnum),
+                "total": total,
+            }
+            # add raw (unweighted) per-term energies as separate columns
+            row.update(per_term)
+            rows.append(row)
 
     if not rows:
         return pd.DataFrame(columns=["binder_id", "target_id", "binder_res", "target_res", "total"])
@@ -268,7 +275,7 @@ def main():
     out_df = pd.DataFrame(
         [{"pdbpath": args.pdb, "binder_id": args.binder_id, "binder_energy": summed_dict}]
     )
-    out_csv = os.path.join(args.output_dir, "residue_energy_pyrosetta.csv")
+    out_csv = os.path.join(args.output_dir, f"{pdb_basename}_residue_energy_pyrosetta.csv")
     out_df.to_csv(out_csv, index=False)
 
     # step 5: identify strongly favorable residues and record their amino acids
@@ -298,7 +305,7 @@ def main():
             }
         ]
     )
-    fixed_csv = os.path.join(args.output_dir, "fixed_residue_pyrosetta.csv")
+    fixed_csv = os.path.join(args.output_dir, f"{pdb_basename}_fixed_residue_pyrosetta.csv")
     fixed_residue_df.to_csv(fixed_csv, index=False)
 
     print(f"Saved per-residue interface energies to {out_csv}")

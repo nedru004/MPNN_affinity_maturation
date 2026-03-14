@@ -32,6 +32,35 @@ def _build_file_index(root: Path, patterns: List[str]) -> Dict[str, List[Path]]:
     return index
 
 
+def concatenate_fixed_residue_csvs(input_dir: str):
+    # extract and concatenate all fixed_residue_pyrosetta.csv files
+    residue_energy = pd.concat([pd.read_csv(os.path.join(input_dir, file)) for file in os.listdir(input_dir) if file.endswith("_fixed_residue_pyrosetta.csv")])
+
+    save_csv=f"{input_dir}/fixed_residue.csv"
+
+    # for the pdb_name column, remove the last part
+    residue_energy["pdb_name"] = residue_energy["pdb_name"].apply(lambda x: '_'.join(x.split("_")[:-1]))
+    # for each unique pdb_name, concatenate the key_res column. create a new df for this data
+    new_df = pd.DataFrame()
+    for pdb_name in residue_energy["pdb_name"].unique():
+        # extract all rows with the same pdb_name
+        pdb_name_rows = residue_energy[residue_energy["pdb_name"] == pdb_name]
+        # convert key_res to dictionary
+        pdb_name_rows["key_res"] = pdb_name_rows["key_res"].apply(lambda x: {k: v for k, v in ast.literal_eval(x).items()})
+        # extract the line with the highest number of fixed residues
+        max_fixed_residues = pdb_name_rows["num_fixed_residues"].max()
+        max_fixed_residues_line = pdb_name_rows[pdb_name_rows["num_fixed_residues"] == max_fixed_residues]
+        # concatenate the key_res column
+        key_res = pdb_name_rows["key_res"].apply(lambda x: {k: v for k, v in x.items()})
+        for row in key_res:
+            for k, v in row.items():
+                if k not in max_fixed_residues_line["key_res"][0].keys():
+                    max_fixed_residues_line["key_res"][0][k] = v
+        new_df = pd.concat([new_df, max_fixed_residues_line], ignore_index=True)
+
+    new_df.to_csv(f'{save_csv}',index=False)
+
+
 def _candidate_names_from_path(json_file: Path, extra_candidates: Optional[List[str]] = None) -> List[str]:
     """
     Derive candidate names for matching a JSON file to an original PDB
@@ -264,14 +293,15 @@ def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb")
         for folder in input_dirs:
             if not os.path.exists(folder): continue
             files = [os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(('.fasta', '.fa'))]
-
+            i = 0
             for file_path in files:
                 base_name = os.path.splitext(os.path.basename(file_path))[0]
 
-                for i, record in enumerate(SeqIO.parse(file_path, "fasta")):
-                    if i == 0:
-                        continue
-
+                for j, record in enumerate(SeqIO.parse(file_path, "fasta")):
+                    if j == 0:
+                        continue # skip the first record
+                    else:
+                        i += 1
                     seq_str = str(record.seq)
                     if seq_str in seen_seqs:
                         continue
@@ -280,7 +310,6 @@ def direct_fasta_to_csv(input_dirs: list, output_csv: str, suffix: str = ".pdb")
                     seq_idx = str(i)
 
                     writer.writerow([link_name, seq_str, seq_idx])
-
     print(f"✅ Processing complete! {len(seen_seqs)} unique sequences have been written to: {output_csv}")
 
 def filter_boltz_scores(
